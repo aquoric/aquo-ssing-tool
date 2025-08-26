@@ -1,7 +1,6 @@
 
 
 # R=scans: memory scan, disk scan, logs, process list, JNativeHook, deleted .EXE's AND jars (.jar)
-# Runs in the same console; no UAC prompts. Pure ctypes for memory reads.
 
 import os, sys, re, gzip, io, time, ctypes, subprocess, hashlib, glob
 import ctypes.wintypes as wintypes
@@ -942,3 +941,4 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
+
