@@ -1,6 +1,6 @@
 
 
-# Real detections: memory scan, disk scan, logs, process list, JNativeHook, deleted EXEs.
+# R=scans: memory scan, disk scan, logs, process list, JNativeHook, deleted .EXE's AND jars (.jar)
 # Runs in the same console; no UAC prompts. Pure ctypes for memory reads.
 
 import os, sys, re, gzip, io, time, ctypes, subprocess, hashlib, glob
@@ -279,7 +279,7 @@ javawStrings = {
     "Cucklord inside!": "Anti SS Tool"
 }
 
-# Keywords that flag illegal mods when found in filenames/paths
+# keywords that flag illegal mods when found in filenames
 ILLEGAL_KEYWORDS = [
     "xray","wurst","meteor","aristois","impact","liquidbounce","inertia",
     "sigma","kronos","killaura","reachmod","autoclick","aimassist","esp",
@@ -287,14 +287,14 @@ ILLEGAL_KEYWORDS = [
     "kryp","ethylen","lemonade","pepe","phantom","verzide","mouseTweaks" # add/trim as desired
 ]
 
-# Optional known-bad file hashes (sha256) — keep as an example; add real hashes if you have them
+# doomsday hashes, but ts kinda bad for detection since doomsday gives an option to randomize filesizes which changes the hash
 known_bad_hashes = {
      "648ca4f9c2964bea3e91685a32e0381c803d648cc358b39ae4071fd3be77fed6": "doomsdayclient",
      "9d110e6c54eb25e3b2683a94a1db579629ab4c7b5efb8e309da9be440bddb178": "doomsdayclient"
 }
 
 # ----------------------------
-# Recording software via tasklist
+# checking for recording software (to prevent bypassing screenshare by recording the ss session)
 # ----------------------------
 
 def detect_recorders():
@@ -306,7 +306,7 @@ def detect_recorders():
             found.append((img, recordingSoftwares[img]))
     return found
 # ----------------------------
-# Helpers: files, hashing, search
+# helpers: files, hashing, search
 # ----------------------------
 
 def iter_files(base, exts=None):
@@ -336,7 +336,7 @@ def sha256_of_file(path, max_bytes=None):
         return None
 
 # ----------------------------
-# Windows process utilities (no psutil)
+# Windows process utilities (no psutil alternative)
 # ----------------------------
 
 def tasklist():
@@ -360,7 +360,7 @@ def get_pid_by_name(name, service=False):
     return None
 
 # ----------------------------
-# Pure ctypes memory reader
+# PURE ctypes memory reader
 # ----------------------------
 
 PROCESS_QUERY_INFORMATION = 0x0400
@@ -449,13 +449,10 @@ def file_hash(path, algo="sha256"):
         return None
 
 # ----------------------------
-# Deleted EXE discovery via PCA & Explorer memory
-# ----------------------------
-# ----------------------------
 # Deleted EXE discovery methods
 # ----------------------------
 
-# Attempt PCA + Explorer-based method, fallback to error if missing
+# Attempt PCA + Explorer-based method (astro ac method), fallback to error if missing 
 
 def get_deleted_executables_pca():
     try:
@@ -467,7 +464,7 @@ def get_deleted_executables_pca():
     except Exception:
         return {}, "error"
 
-# Prefetch-based deleted EXE scan
+# Prefetch-based deleted EXE scan (my method)
 def scan_prefetch_deleted_exes():
     results = []
     pf_dir = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "Prefetch")
@@ -489,7 +486,7 @@ def scan_prefetch_deleted_exes():
                 results.append((base, "bad_hash", h))
     return results
 
-# Attached-image inspired approach: parse Prefetch hashes & Explorer fallback
+# Attached-image inspired approach: parse Prefetch hashes & Explorer fallback (my method)
 
 def scan_prefetch_hashes():
     results = []
@@ -550,10 +547,6 @@ def scan_recycle_bin_deleted_exes():
     return results
 
 
-
-# ----------------------------
-# Disk scan: Minecraft dirs / jars / mods
-# ----------------------------
 # ----------------------------
 # Disk scan: Minecraft dirs / jars / mods
 # ----------------------------
@@ -571,7 +564,7 @@ def minecraft_paths():
     # microsoft store
     paths.append(os.path.join(localappdata, "Packages", "Microsoft.MinecraftUWP_8wekyb3d8bbwe"))
 
-    # Popular 3rd-party launchers
+    # popular 3rd-party launchers
     launcher_dirs = [
         "MultiMC", "PrismLauncher", "PolyMC", "ATLauncher", "Technic", "TLauncher",
         "SKLauncher", "HMCL", "LunarClient", "Feather", "Badlion Client",
@@ -591,7 +584,7 @@ def minecraft_paths():
     # Overwolf (CurseForge wrapper)
     paths.append(os.path.join(appdata, "Overwolf", "CurseForge", "minecraft"))
 
-    # Known portable dirs in Downloads/Desktop
+    # known portable dirs in Downloads/Desktop
     paths.append(os.path.join(user, "Downloads", "MultiMC"))
     paths.append(os.path.join(user, "Desktop", "MultiMC"))
 
@@ -748,7 +741,7 @@ def classify(findings):
     return verdict, reasons
 
 # ----------------------------
-# Memory scan: javaw.exe for known strings & DPS & generic cheat keywords
+# Memory scan: javaw.exe for known strings (javaW string from config) & DPS AND generic cheat keywords (can misflag)
 # ----------------------------
 
 def scan_javaw_memory(javaw_pid):
