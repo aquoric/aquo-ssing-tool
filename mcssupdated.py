@@ -1,58 +1,96 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Aquoric's MC ssing tool
+Python 3.8+
 
+P.S, This tool is read-only and does not modify any system files.
+Features are as folllows:
+- Universal Compatibility: Windows 8+, x86/x64
+- Memory scan of javaw.exe for hacked-client signatures & DPS/tooling strings & generic keywords; username extraction
+- Disk scan of common launcher directories; keyword and hash vetting; .class awareness
+- Logs scan: latest.log AND archived .gz
+- Deleted EXE/JAR detection: Prefetch method, PCA/Explorer string scan, Recycle Bin hits against keywords
+- JNativeHook DLL scan in %TEMP% (bad injected clients use ts method)
+- Environment awareness: detects common recorders/overlays bc obs & other softwares have built-in overlay programs to bypass screenshare
+- Classification: CLEAN / SUSPICIOUS / DIRTY + reasons
+- Reporting: .txt and .json logs
 
-# R=scans: memory scan, disk scan, logs, process list, JNativeHook, deleted .EXE's AND jars (.jar)
+Use with caution :)
+"""
 
-import os, sys, re, gzip, io, time, ctypes, subprocess, hashlib, glob
+import os
+import sys
+import re
+import io
+import gzip
+import glob
+import json
+import uuid
+import math
+import time
+import ctypes
+import platform
+import hashlib
+import traceback
 import ctypes.wintypes as wintypes
-from collections import defaultdict, Counter
 from datetime import datetime
-from tqdm import tqdm
-import winreg
+from collections import defaultdict, Counter
 
-# ----------------------------
-# console colors
-# ----------------------------
-RED = "\033[91m"
-RESET = "\033[0m"
+try:
+    import psutil
+except Exception:
+    print("[!] psutil not found. Install with: pip install psutil")
+    sys.exit(1)
 
-# ----------------------------
-# config & signatures
-# ----------------------------
+try:
+    from colorama import init as colorama_init, Fore, Style
+except Exception:
+    class _F: RED=YELLOW=GREEN=CYAN=MAGENTA=RESET=""
+    class _S: RESET_ALL=""
+    Fore=_F(); Style=_S()
+    def colorama_init(*a, **k): pass
+
+try:
+    from tqdm import tqdm
+except Exception:
+    def tqdm(iterable=None, **kwargs):
+        return iterable if iterable is not None else []
+# -------------------------------------
+
+colorama_init(autoreset=True)
+
+TOOL_VERSION = "1.2.0"
+SCAN_ID = uuid.uuid4().hex[:8]
+START_TS = datetime.now()
 
 
-recordingSoftwares = {
-    'bdcam.exe':'Bandicam', 'action.exe':'Action', 'obs64.exe':'OBS', 'obs32.exe':'OBS',
-    'dxtory.exe':'Dxtory', 'nvidia share.exe':'Geforce Experience', 'camtasia.exe':'Camtasia',
-    'fraps.exe':'Fraps', 'screencast.exe':'Screencast'
-}
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOGFILE = os.path.join(SCRIPT_DIR, f"mc_ss_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+# config/signatures
 
-def log_line(text):
-    try:
-        with open(LOGFILE, "a", encoding="utf-8") as f:
-            f.write(text + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-    except Exception as e:
-        print(f"[!] Failed to write log: {e}")
-# dps strings (credit to astro)
-dpsStrings = {
-    '.exe!2019/03/14:20:01:24': 'OP AutoClicker',
-    '.exe!2016/05/30:16:33:32': 'GS AutoClicker',
-    '.exe!2016/04/18:16:56:55': 'AutoClicker',
-    '.exe!2018/11/09:01:13:38': 'GhostBytes',
-    '.exe!2019/07/05:07:17:50': 'Speed AutoClicker'
-}
+# keywords that flag in filenames, memory strings, .class names, etc.
+ILLEGAL_KEYWORDS = [
+    "xray","wurst","meteor","aristois","impact","liquidbounce","inertia",
+    "sigma","kronos","killaura","reachmod","autoclick","aimassist","esp",
+    "flux","huzuni","vape","rinject","incognito","bleach","bape","kryp",
+    "ethylene","lemonade","pepe","phantom","verzide","mousetweaks","baritone",
+    "injector"
+]
 
-# javaW strings (credit to astro)
-javawStrings = {
-    "net/impactclient": "Impact Client",
-    "SqtkUVg": "Vape v3",
-    "erouax/instavape": "Wax Vape Mod",
-    "com/sun/jna/z/a/e/a/a/a/f": "Vape Cracked",
-    "hakery.c": "Latemod Injection Client",
-    ";9<C7D=CHCAL>@?DQI;MDSQRNQIMKEJ8": "Drip Cracked",
+# known memory signatures (injected clients)
+JAVA_SIGNATURES = {
+    "net/wurstclient/features/Mod": "Wurst Client",
+    "META-INF/byCCBlueX/LiquidBounce/": "LiquidBounce",
+    "assets/minecraft/flux/": "Flux Client",
+    "impactclient": "Impact Client",
+    "baritone": "Baritone Pathing",
+    "inertia": "Inertia Client",
+    "meteorclient": "Meteor Client",
+    "killaura": "KillAura Module",
+    "aimassist": "AimAssist Module",
+    "reachmod": "Reach Module",
+    "autoclicker": "AutoClicker Module",
+    "xray.class": "XRay Module",
+       ";9<C7D=CHCAL>@?DQI;MDSQRNQIMKEJ8": "Drip Cracked",
     "ZKM9.0.2": "Demon Injection Client",
     "| By JensDE": "Labymos v6 Client",
     "me/powns/cheatbreakerhud/settings/ModulesGui.class": "Grim Mod Client",
@@ -278,90 +316,88 @@ javawStrings = {
     "Cucklord inside!": "Anti SS Tool"
 }
 
-# keywords that flag illegal mods when found in filenames
-ILLEGAL_KEYWORDS = [
-    "xray","wurst","meteor","aristois","impact","liquidbounce","inertia",
-    "sigma","kronos","killaura","reachmod","autoclick","aimassist","esp",
-    "flux","huzuni","wape","vape","rinject","incognito","bleach","bape",
-    "kryp","ethylen","lemonade","pepe","phantom","verzide","mouseTweaks" # add/trim as desired
-]
-
-# doomsday hashes, but ts kinda bad for detection since doomsday gives an option to randomize filesizes which changes the hash
-known_bad_hashes = {
-     "648ca4f9c2964bea3e91685a32e0381c803d648cc358b39ae4071fd3be77fed6": "doomsdayclient",
-     "9d110e6c54eb25e3b2683a94a1db579629ab4c7b5efb8e309da9be440bddb178": "doomsdayclient"
+# DPS/tooling strings sometimes found in process memory
+DPS_STRINGS = {
+    ".exe!2019/03/14:20:01:24": "OP AutoClicker",
+    ".exe!2016/05/30:16:33:32": "GS AutoClicker",
+    ".exe!2016/04/18:16:56:55": "AutoClicker",
+    ".exe!2018/11/09:01:13:38": "GhostBytes",
+    ".exe!2019/07/05:07:17:50": "Speed AutoClicker",
 }
 
-# ----------------------------
-# checking for recording software (to prevent bypassing screenshare by recording the ss session)
-# ----------------------------
+KNOWN_BAD_HASHES = {
+    # DoomsdayClient hashes (easy to bypass but better than ntg i guess 😭😭)
+    "648ca4f9c2964bea3e91685a32e0381c803d648cc358b39ae4071fd3be77fed6": "DoomsdayClient",
+    "9d110e6c54eb25e3b2683a94a1db579629ab4c7b5efb8e309da9be440bddb178": "DoomsdayClient",
+}
 
-def detect_recorders():
-    procs = tasklist()
-    found = []
-    for p in procs:
-        img = (p["image"] or "").lower()
-        if img in recordingSoftwares:
-            found.append((img, recordingSoftwares[img]))
-    return found
-# ----------------------------
-# helpers: files, hashing, search
-# ----------------------------
+def load_external_db(path="cheat_signatures.json"):
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            ILLEGAL_KEYWORDS[:] = list(set((data.get("illegal_keywords") or ILLEGAL_KEYWORDS)))
+            JAVA_SIGNATURES.update(data.get("java_signatures") or {})
+            DPS_STRINGS.update(data.get("dps_strings") or {})
+            KNOWN_BAD_HASHES.update(data.get("known_bad_hashes") or {})
+    except Exception:
+        # anti-crash
+        pass
 
-def iter_files(base, exts=None):
-    exts = [e.lower() for e in (exts or [])]
-    for root, dirs, files in os.walk(base, topdown=True):
-        # Skip heavy dirs
-        dirs[:] = [d for d in dirs if d.lower() not in ("node_modules","$recycle.bin","windows","program files","program files (x86)")]
-        for f in files:
-            fp = os.path.join(root, f)
-            if exts:
-                if any(f.lower().endswith(e) for e in exts):
-                    yield fp
-            else:
-                yield fp
+# screenrecording software have overlay programs built in which can be used to bypass ss
+RECORDERS = {
+    "obs64.exe": "OBS",
+    "obs32.exe": "OBS",
+    "bdcam.exe": "Bandicam",
+    "action.exe": "Action!",
+    "dxtory.exe": "Dxtory",
+    "nvidia share.exe": "NVIDIA ShadowPlay",
+    "camtasia.exe": "Camtasia",
+    "fraps.exe": "Fraps",
+    "screencast.exe": "Screencast"
+}
 
-def sha256_of_file(path, max_bytes=None):
+# ---------------------------
+# helpers :)
+# ---------------------------
+
+def sha256_file(path, block=1<<20):
     h = hashlib.sha256()
     try:
         with open(path, "rb") as f:
-            if max_bytes:
-                h.update(f.read(max_bytes))
-            else:
-                for chunk in iter(lambda: f.read(1024*1024), b""):
-                    h.update(chunk)
+            while True:
+                b = f.read(block)
+                if not b:
+                    break
+                h.update(b)
         return h.hexdigest()
     except Exception:
         return None
 
-# ----------------------------
-# Windows process utilities (no psutil alternative)
-# ----------------------------
+def safe_walk(top):
+    # swallowing permission errors and skipping heavy system roots
+    for root, dirs, files in os.walk(top, topdown=True, onerror=lambda e: None):
+        dirs[:] = [d for d in dirs if d.lower() not in (
+            "node_modules","$recycle.bin","windows","program files","program files (x86)")]
+        yield root, files
 
-def tasklist():
-    try:
-        out = subprocess.check_output(["tasklist", "/fo", "csv", "/nh"], creationflags=0x08000000)
-        text = out.decode("utf-8", errors="ignore").splitlines()
-        rows = []
-        for line in text:
-            parts = [p.strip('"') for p in line.split('","')]
-            if len(parts) >= 2:
-                rows.append({"image": parts[0], "pid": int(parts[1]) if parts[1].isdigit() else None})
-        return rows
-    except Exception:
-        return []
+def printable_strings(raw: bytes, min_len=4):
+    out, run = [], []
+    for ch in raw:
+        if 32 <= ch <= 126:
+            run.append(chr(ch))
+        else:
+            if len(run) >= min_len:
+                out.append("".join(run))
+            run = []
+    if len(run) >= min_len:
+        out.append("".join(run))
+    return out
 
-def get_pid_by_name(name, service=False):
-    name = name.lower()
-    for row in tasklist():
-        if row["image"].lower() == name:
-            return row["pid"]
-    return None
 
-# ----------------------------
-# PURE ctypes memory reader
-# ----------------------------
-
+# memory reading via WinAPI (ctypes)
 PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_VM_READ = 0x0010
 MEM_COMMIT = 0x1000
@@ -370,575 +406,594 @@ PAGE_NOACCESS = 0x01
 
 class MEMORY_BASIC_INFORMATION(ctypes.Structure):
     _fields_ = [
-        ("BaseAddress", wintypes.LPVOID),
-        ("AllocationBase", wintypes.LPVOID),
+        ("BaseAddress",      wintypes.LPVOID),
+        ("AllocationBase",   wintypes.LPVOID),
         ("AllocationProtect", wintypes.DWORD),
-        ("RegionSize", ctypes.c_size_t),
-        ("State", wintypes.DWORD),
-        ("Protect", wintypes.DWORD),
-        ("Type", wintypes.DWORD),
+        ("RegionSize",       ctypes.c_size_t),
+        ("State",            wintypes.DWORD),
+        ("Protect",          wintypes.DWORD),
+        ("Type",             wintypes.DWORD)
     ]
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+OpenProcess = kernel32.OpenProcess
+OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+OpenProcess.restype = wintypes.HANDLE
+ReadProcessMemory = kernel32.ReadProcessMemory
+ReadProcessMemory.argtypes = [wintypes.HANDLE, wintypes.LPCVOID,
+                              wintypes.LPVOID, ctypes.c_size_t,
+                              ctypes.POINTER(ctypes.c_size_t)]
+ReadProcessMemory.restype = wintypes.BOOL
+VirtualQueryEx = kernel32.VirtualQueryEx
+VirtualQueryEx.argtypes = [wintypes.HANDLE, wintypes.LPCVOID,
+                           ctypes.POINTER(MEMORY_BASIC_INFORMATION),
+                           ctypes.c_size_t]
+VirtualQueryEx.restype = ctypes.c_size_t
+CloseHandle = kernel32.CloseHandle
 
-def _read_region(hproc, address, size):
+def _read_region(hproc, address, size, limit=16*1024*1024):
+    """
+    Attempt to read a memory region from another process.
+    Skips unreadable/guarded pages gracefully.
+    """
+    size = min(size, limit)
     buf = (ctypes.c_char * size)()
     read = ctypes.c_size_t(0)
-    if not kernel32.ReadProcessMemory(hproc, ctypes.c_void_p(address), buf, size, ctypes.byref(read)):
+    success = ReadProcessMemory(hproc, ctypes.c_void_p(address),
+                                buf, size, ctypes.byref(read))
+    if not success:
+        # skip silently if region not readable
         return b""
-    return bytes(buf[: read.value])
+    return bytes(buf[:read.value])
 
-def dump_process_strings(pid, min_length=4, max_address=0x7FFFFFFFFFFF):
-    findings = []
-    hproc = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
-    if not hproc:
-        return None, "permission_denied"
-
-    mbi = MEMORY_BASIC_INFORMATION()
-    addr = 0
-    scanned = 0
-    while addr < max_address:
-        res = kernel32.VirtualQueryEx(hproc, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi))
-        if not res:
-            addr += 0x1000
-            continue
-        commit = (mbi.State == MEM_COMMIT)
-        protected = (mbi.Protect & PAGE_GUARD) or (mbi.Protect == PAGE_NOACCESS)
-        if commit and not protected and mbi.RegionSize:
-            data = _read_region(hproc, addr, mbi.RegionSize)
-            if data:
-                text = data.decode("latin-1", errors="ignore")
-                for m in re.findall(r"[ -~]{%d,}" % min_length, text):
-                    findings.append(m)
-        addr += mbi.RegionSize
-        scanned += mbi.RegionSize
-        if scanned > (256 * 1024 * 1024):  # ~256MB cap
-            break
-
-    kernel32.CloseHandle(hproc)
-    return findings, None
-
-# ----------------------------
-# JNativeHook DLL check (temp folder)
-# ----------------------------
-
-def check_jnativehook():
-    temp = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Temp")
-    found = []
+def dump_process_strings(pid, min_length=5, max_total_read=256*1024*1024):
+  #dump printable strings from memory of mc and cross-checks flags against javaW strings from config
     try:
-        for f in os.listdir(temp):
-            if f.endswith(".dll") and "JNativeHook" in f:
-                found.append(os.path.join(temp, f))
+        PROCESS_ALL_ACCESS = 0x1F0FFF
+        hProc = OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+        if not hProc:
+            return [], "permission_denied"
+
+        addr = 0
+        total = 0
+        collected = []
+        mbi = MEMORY_BASIC_INFORMATION()
+
+        while True:
+            res = VirtualQueryEx(hProc, ctypes.c_void_p(addr),
+                                 ctypes.byref(mbi), ctypes.sizeof(mbi))
+            if not res:
+                break
+
+            guard = (mbi.Protect & PAGE_GUARD) or (mbi.Protect & PAGE_NOACCESS)
+            if (mbi.State == MEM_COMMIT) and not guard:
+                chunk = _read_region(hProc, mbi.BaseAddress, mbi.RegionSize)
+                if chunk:
+                    total += len(chunk)
+                    collected.extend(printable_strings(chunk, min_len=min_length))
+                    if total >= max_total_read:
+                        break
+
+            addr += mbi.RegionSize
+            if addr <= 0 or addr > 0x7FFFFFFFFFFF:
+                break
+
+        CloseHandle(hProc)
+        return collected, ""
+    except psutil.NoSuchProcess:
+        return [], "no_process"
     except Exception:
-        pass
-    return found
+        return [], "permission_denied"
+
+# scanners
 
 
-#------
-#file hashing
-#------
-def file_hash(path, algo="sha256"):
-    try:
-        h = hashlib.new(algo)
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    except Exception:
+def minecraft_dirs():
+    """Common launcher roots; only existing paths are returned."""
+    home = os.path.expanduser("~")
+    appdata = os.environ.get("APPDATA", os.path.join(home, "AppData", "Roaming"))
+    localapp = os.environ.get("LOCALAPPDATA", os.path.join(home, "AppData", "Local"))
+    programdata = os.environ.get("PROGRAMDATA", r"C:\ProgramData")
+
+    dirs = [
+        # mojang / microsoft store
+        os.path.join(appdata, ".minecraft"),
+        os.path.join(localapp, "Packages", "Microsoft.MinecraftUWP_8wekyb3d8bbwe"),
+
+        # popular 3rd party lauchers
+        os.path.join(localapp, "PrismLauncher"),
+        os.path.join(localapp, "Programs", "PrismLauncher"),
+        os.path.join(localapp, "MultiMC"),
+        os.path.join(appdata, ".technic"),
+        os.path.join(appdata, ".gdlauncher"),
+        os.path.join(appdata, ".curseforge"),
+        os.path.join(appdata, "curseforge", "minecraft"),
+        os.path.join(appdata, "Overwolf", "CurseForge", "minecraft"),
+        os.path.join(appdata, ".minecraft", "mods"),
+        os.path.join(appdata, "ATLauncher"),
+        os.path.join(localapp, "LunarClient"),
+        os.path.join(appdata, "BadlionClient"),
+        os.path.join(appdata, "Feather"),
+        os.path.join(programdata, "Microsoft", "Windows", "Start Menu", "Programs", "CurseForge"),
+        # portable launchers
+        os.path.join(home, "Downloads", "MultiMC"),
+        os.path.join(home, "Desktop", "MultiMC"),
+    ]
+    uniq, seen = [], set()
+    for d in dirs:
+        if d and d.lower() not in seen and os.path.isdir(d):
+            uniq.append(d); seen.add(d.lower())
+    return uniq
+
+class MemoryScanner:
+    def __init__(self):
+        self.findings = {"pid": None, "username_hint": None,
+                         "sig_hits": [], "dps_hits": [], "generic_hits": []}
+
+    @staticmethod
+    def _find_pid_by_name(name_substr):
+        for p in psutil.process_iter(attrs=["pid", "name"]):
+            try:
+                if p.info["name"] and name_substr.lower() in p.info["name"].lower():
+                    return p.info["pid"]
+            except Exception:
+                continue
         return None
 
-# ----------------------------
-# Deleted EXE discovery methods
-# ----------------------------
+    def scan_javaw(self):
+        pid = self._find_pid_by_name("javaw")
+        self.findings["pid"] = pid
+        if not pid:
+            return self.findings
 
-# Attempt PCA + Explorer-based method (astro ac method), fallback to error if missing 
+        strings, err = dump_process_strings(pid, min_length=5)
+        if err:
+            self.findings["error"] = err
+            return self.findings
 
-def get_deleted_executables_pca():
-    try:
-        return get_deleted_executables()  # existing function from original script
-    except NameError:
-        return {}, "missing_pids"
-    except PermissionError:
-        return {}, "permission_denied"
-    except Exception:
-        return {}, "error"
+        low = [s.lower() for s in strings]
+        low_set = set(low)
 
-# Prefetch-based deleted EXE scan (my method)
-def scan_prefetch_deleted_exes():
-    results = []
-    pf_dir = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "Prefetch")
-    if not os.path.isdir(pf_dir):
-        return results
-    for pf in glob.glob(os.path.join(pf_dir, "*.pf")):
-        base = os.path.basename(pf).split("-")[0] + ".exe"
-        found_path = None
-        for d in os.environ["PATH"].split(os.pathsep):
-            candidate = os.path.join(d, base)
-            if os.path.exists(candidate):
-                found_path = candidate
-                break
-        if not found_path:
-            results.append((base, "deleted", None))
-        else:
-            h = file_hash(found_path)
-            if h and h in known_bad_hashes:
-                results.append((base, "bad_hash", h))
-    return results
+        for sig, label in JAVA_SIGNATURES.items():
+            s = sig.lower()
+            if any(s in x for x in low_set):
+                self.findings["sig_hits"].append({"signature": sig, "label": label})
 
-# Attached-image inspired approach: parse Prefetch hashes & Explorer fallback (my method)
+        for sig, label in DPS_STRINGS.items():
+            s = sig.lower()
+            if any(s in x for x in low_set):
+                self.findings["dps_hits"].append({"signature": sig, "label": label})
 
-def scan_prefetch_hashes():
-    results = []
-    pf_dir = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "Prefetch")
-    if not os.path.isdir(pf_dir):
-        return results
-    for pf in glob.glob(os.path.join(pf_dir, "*.pf")):
+        generic = set()
+        for kw in ILLEGAL_KEYWORDS:
+            if any(kw in x for x in low_set):
+                generic.add(kw)
+        self.findings["generic_hits"] = sorted(list(generic))
+
+        # very basic username heuristics
+        for s in strings:
+            sl = s.lower()
+            if "logged in as" in sl or "username" in sl:
+                m = re.search(r"(?:as|username)\s*[:=]\s*([A-Za-z0-9_]{3,16})", s, re.IGNORECASE)
+                if m:
+                    self.findings["username_hint"] = m.group(1)
+                    break
+
+        return self.findings
+
+class DiskScanner:
+    EXTENSIONS = (".jar", ".zip", ".rar", ".7z", ".dll", ".exe", ".class")
+
+    def __init__(self, known_hashes=None):
+        self.known_hashes = known_hashes or {}
+        self.findings = {"roots": [], "flagged_by_name": [], "flagged_by_hash": [], "mods_index": []}
+
+    def scan(self):
+        roots = minecraft_dirs()
+        self.findings["roots"] = roots
+        for root in roots:
+            for base, files in safe_walk(root):
+                for fn in files:
+                    path = os.path.join(base, fn)
+                    low = fn.lower()
+
+                    # filename-based flags 
+                    if low.endswith(self.EXTENSIONS) and any(k in low for k in ILLEGAL_KEYWORDS):
+                        self.findings["flagged_by_name"].append({"path": path, "reason": "keyword"})
+
+                    # hash-based flags
+                    if low.endswith(self.EXTENSIONS) and (low.endswith(".jar") or low.endswith(".zip")
+                                                          or low.endswith(".dll") or low.endswith(".exe")):
+                        h = sha256_file(path)
+                        if h and h in self.known_hashes:
+                            self.findings["flagged_by_hash"].append({"path": path, "sha256": h, "label": self.known_hashes[h]})
+
+                    # index .jar/.zip/.class presence (for operator review)
+                    if low.endswith((".jar",".zip",".class")):
+                        self.findings["mods_index"].append(path)
+        return self.findings
+
+class LogParser:
+    def __init__(self):
+        self.findings = {"log_roots": [], "suspicious_markers": [], "servers": []}
+
+    def _mc_logs(self):
+        roots = []
+        for d in minecraft_dirs():
+            logs = os.path.join(d, "logs")
+            if os.path.isdir(logs):
+                roots.append(logs)
+        return roots
+
+    def _parse_log_stream(self, name, stream):
+        suspicious = []
+        servers = set()
         try:
-            base = os.path.basename(pf).split("-")[0] + ".exe"
-            h = file_hash(pf)
-            if h and h in known_bad_hashes:
-                results.append((base, "prefetch_hash_match", h))
+            for raw in stream:
+                line = raw.decode("utf-8", errors="ignore") if isinstance(raw, (bytes, bytearray)) else raw
+                low = line.lower()
+                # suspicious markers
+                if any(k in low for k in ILLEGAL_KEYWORDS) or \
+                   any(k in low for k in ("baritone","liquidbounce","wurst","meteor","impact","inertia")):
+                    suspicious.append(line.strip())
+
+                # server entries
+                # "Connecting to <host>, <port>" etc
+                m = re.search(r"connecting to\s+([A-Za-z0-9\.\-]+),\s*(\d+)", low)
+                if m:
+                    servers.add(f"{m.group(1)}:{m.group(2)}")
         except Exception:
-            continue
-    return results
+            pass
+        return suspicious, sorted(servers)
 
-# Recycle Bin scanning helpers
-def sid2user(sid):
-    try:
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-            r"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\" + sid)
-        value, _ = winreg.QueryValueEx(key, 'ProfileImagePath')
-        user = value.split('\\')[-1]
-        return user
-    except Exception:
-        return sid
+    def scan(self):
+        roots = self._mc_logs()
+        self.findings["log_roots"] = roots
+        seen_servers = set()
+        for root in roots:
+            # latest.log
+            latest = os.path.join(root, "latest.log")
+            if os.path.isfile(latest):
+                try:
+                    with open(latest, "rb") as f:
+                        susp, servers = self._parse_log_stream("latest.log", f)
+                        self.findings["suspicious_markers"].extend(susp)
+                        seen_servers.update(servers)
+                except Exception:
+                    pass
+            # archived .gz filessssss
+            for gz in glob.glob(os.path.join(root, "*.gz")):
+                try:
+                    with gzip.open(gz, "rb") as f:
+                        susp, servers = self._parse_log_stream(os.path.basename(gz), f)
+                        self.findings["suspicious_markers"].extend(susp)
+                        seen_servers.update(servers)
+                except Exception:
+                    continue
+        self.findings["servers"] = sorted(list(seen_servers))
+        # remove excessive markers to keep JSON/log readable
+        if len(self.findings["suspicious_markers"]) > 2000:
+            self.findings["suspicious_markers"] = self.findings["suspicious_markers"][:2000] + ["...(truncated)"]
+        return self.findings
 
-def returnDir():
-    dirs=['C:\\$Recycle.Bin', 'C:\\Recycler', 'C:\\Recycled']
-    for recycleDir in dirs:
-        if os.path.isdir(recycleDir):
-            return recycleDir
-    return None
+class DeletedFileScanner:
+    def __init__(self):
+        self.findings = {"prefetch_suspects": [], "pca_deleted_paths": [], "recycle_bin_hits": []}
 
-def scan_recycle_bin_deleted_exes():
-    results = []
-    recycleDir = returnDir()
-    if not recycleDir:
-        return results
-    try:
-        for sid in os.listdir(recycleDir):
-            user = sid2user(sid)
-            path = os.path.join(recycleDir, sid)
-            if not os.path.isdir(path):
+    @staticmethod
+    def scan_prefetch():
+        hits = []
+        windir = os.environ.get("WINDIR", r"C:\Windows")
+        prefetch = os.path.join(windir, "Prefetch")
+        if not os.path.isdir(prefetch):
+            return hits
+        try:
+            for fn in os.listdir(prefetch):
+                low = fn.lower()
+                if (low.endswith(".pf")) and (".exe-" in low or ".jar-" in low):
+                    if any(k in low for k in ILLEGAL_KEYWORDS) or any(k in low for k in ("java","javaw","minecraft","launcher")):
+                        hits.append(os.path.join(prefetch, fn))
+        except PermissionError:
+            print(Fore.RED + "    - Access denied reading Prefetch (skipping)." + Style.RESET_ALL)
+            return []
+        except Exception as e:
+            print(Fore.RED + f"    - Error reading Prefetch: {e}" + Style.RESET_ALL)
+            return []
+        return hits
+
+
+    @staticmethod
+    def _pca_explorer_deleted():
+        """
+        string scan of PCA/Explorer persistence files for absolute paths to .exe/.jar that no longer exist.
+        We scan common locations:
+          - %LOCALAPPDATA%\Microsoft\Windows\PCA\
+          - %LOCALAPPDATA%\Microsoft\Windows\Explorer\
+        """
+        suspects = set()
+        home = os.path.expanduser("~")
+        localapp = os.environ.get("LOCALAPPDATA", os.path.join(home, "AppData", "Local"))
+        roots = [
+            os.path.join(localapp, "Microsoft", "Windows", "PCA"),
+            os.path.join(localapp, "Microsoft", "Windows", "Explorer"),
+        ]
+        path_rx = re.compile(r"[a-z]:\\[^:*?\"<>|]{3,}\.(exe|jar)", re.IGNORECASE)
+        for r in roots:
+            if not os.path.isdir(r):
                 continue
-            for f in os.listdir(path):
-                fp = os.path.join(path, f)
-                if f.lower().endswith(".exe"):
-                    h = file_hash(fp)
-                    if not os.path.exists(fp):
-                        results.append((f, user, "deleted", None))
-                    elif h and h in known_bad_hashes:
-                        results.append((f, user, "bad_hash", h))
-                    else:
-                        results.append((f, user, "present", h))
-    except Exception:
-        pass
-    return results
+            for base, files in safe_walk(r):
+                for fn in files:
+                    path = os.path.join(base, fn)
+                    try:
+                        with open(path, "rb") as f:
+                            data = f.read()
+                        for s in printable_strings(data, min_len=6):
+                            for m in path_rx.finditer(s):
+                                p = m.group(0)
+                                if not os.path.isfile(p):
+                                    suspects.add(p)
+                    except Exception:
+                        continue
+        return sorted(suspects)
 
+    @staticmethod
+    def _recycle_bin_hits():
+        hits = []
+        drive = os.path.splitdrive(os.environ.get("SystemDrive", "C:"))[0] + "\\"
+        rb_root = os.path.join(drive, "$Recycle.Bin")
+        if not os.path.isdir(rb_root):
+            return hits
+        for root, _, files in os.walk(rb_root):
+            for fn in files:
+                low = fn.lower()
+                if low.endswith(".exe") or low.endswith(".jar"):
+                    hits.append(os.path.join(root, fn))
+        return hits
 
-# ----------------------------
-# Disk scan: Minecraft dirs / jars / mods
-# ----------------------------
+    def scan(self):
+        self.findings["prefetch_suspects"] = self.scan_prefetch()
+        self.findings["pca_deleted_paths"] = self._pca_explorer_deleted()
+        self.findings["recycle_bin_hits"] = self._recycle_bin_hits()
+        return self.findings
 
-def minecraft_paths():
-    paths = []
-    user = os.path.expanduser("~")
-    appdata = os.getenv("APPDATA") or os.path.join(user, "AppData", "Roaming")
-    localappdata = os.getenv("LOCALAPPDATA") or os.path.join(user, "AppData", "Local")
-    documents = os.path.join(user, "Documents")
+class JNativeHookScanner:
+    def __init__(self):
+        self.findings = {"temp_dlls": []}
 
-    # mojang launcher
-    paths.append(os.path.join(appdata, ".minecraft"))
+    def scan(self):
+        temp = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Temp")
+        if os.path.isdir(temp):
+            try:
+                for f in os.listdir(temp):
+                    if f.lower().endswith(".dll") and "jnativehook" in f.lower():
+                        self.findings["temp_dlls"].append(os.path.join(temp, f))
+            except Exception:
+                pass
+        return self.findings
 
-    # microsoft store
-    paths.append(os.path.join(localappdata, "Packages", "Microsoft.MinecraftUWP_8wekyb3d8bbwe"))
+class EnvironmentScanner:
+    def __init__(self):
+        self.findings = {"recorders_running": []}
 
-    # popular 3rd-party launchers
-    launcher_dirs = [
-        "MultiMC", "PrismLauncher", "PolyMC", "ATLauncher", "Technic", "TLauncher",
-        "SKLauncher", "HMCL", "LunarClient", "Feather", "Badlion Client",
-        "Salwyrr", "GDLauncher", "VoidLauncher", "CrystalLauncher", "LabyMod"
-    ]
-    for launcher in launcher_dirs:
-        paths.append(os.path.join(user, launcher))
-
-    # CurseForge
-    paths.append(os.path.join(documents, "CurseForge", "minecraft"))
-    paths.append(os.path.join(appdata, "curseforge", "minecraft"))
-
-    # GDLauncher (new + old)
-    paths.append(os.path.join(appdata, "gdlauncher_next"))
-    paths.append(os.path.join(appdata, "GDLauncher"))
-
-    # Overwolf (CurseForge wrapper)
-    paths.append(os.path.join(appdata, "Overwolf", "CurseForge", "minecraft"))
-
-    # known portable dirs in Downloads/Desktop
-    paths.append(os.path.join(user, "Downloads", "MultiMC"))
-    paths.append(os.path.join(user, "Desktop", "MultiMC"))
-
-    return [p for p in paths if os.path.isdir(p)]
-
-def safe_iter_files(base, exts=None):
-    exts = [e.lower() for e in (exts or [])]
-    for root, dirs, files in os.walk(base, topdown=True, onerror=lambda e: None):
-        dirs[:] = [d for d in dirs if d.lower() not in (
-            "node_modules","$recycle.bin","windows","program files","program files (x86)")]
-        for f in files:
-            fp = os.path.join(root, f)
-            if not exts or any(f.lower().endswith(e) for e in exts):
-                yield fp
-
-def list_mods_and_flag_illegal():
-    mods_found = []
-    flagged = []
-    paths = minecraft_paths()
-
-    for base in tqdm(paths, desc="Scanning Minecraft installations", unit="dir"):
-        all_files = list(safe_iter_files(base, exts=[".jar", ".zip"]))
-        for fp in tqdm(all_files, desc=f"  -> {os.path.basename(base)}", unit="file", leave=False):
-            mods_found.append(fp)
-            modname = os.path.basename(fp).lower()
-            if any(k in modname for k in ILLEGAL_KEYWORDS):
-                flagged.append((fp, "keyword"))
-            h = sha256_of_file(fp, max_bytes=1024*1024)
-            if h and h in known_bad_hashes:
-                flagged.append((fp, f"hash:{known_bad_hashes[h]}"))
-    return mods_found, flagged
-
-# ----------------------------
-# Recycle Bin scan: EXEs + JARs
-# ----------------------------
-
-def scan_recycle_bin_deleted_files():
-    results = []
-    recycleDir = returnDir()
-    if not recycleDir:
-        return results
-    try:
-        for sid in os.listdir(recycleDir):
-            user = sid2user(sid)
-            path = os.path.join(recycleDir, sid)
-            if not os.path.isdir(path):
+    def scan(self):
+        procs = {}
+        for p in psutil.process_iter(attrs=["pid", "name"]):
+            try:
+                name = (p.info["name"] or "").lower()
+                procs[name] = p.info["pid"]
+            except Exception:
                 continue
-            for f in os.listdir(path):
-                fp = os.path.join(path, f)
-                lower = f.lower()
-                if lower.endswith(".exe") or lower.endswith(".jar"):
-                    h = file_hash(fp)
-                    status = "present"
-                    reason = None
+        for exe, label in RECORDERS.items():
+            if exe.lower() in procs:
+                self.findings["recorders_running"].append({"process": exe, "label": label, "pid": procs[exe.lower()]})
+        return self.findings
 
-                    if not os.path.exists(fp):
-                        status = "deleted"
-                    elif h and h in known_bad_hashes:
-                        status = "bad_hash"; reason = h
-                    elif any(k in lower for k in ILLEGAL_KEYWORDS):
-                        status = "illegal_keyword"; reason = next(k for k in ILLEGAL_KEYWORDS if k in lower)
+# ---------------------------
+# classification and reporting
+# ---------------------------
 
-                    results.append((f, user, status, reason))
-    except Exception:
-        pass
-    return results
+class Classifier:
+    """
+      - DIRTY if:
+          * any java memory signature hit, OR
+          * any known-bad hash on disk, OR
+          * JNativeHook DLL(s) found in %TEMP%
+      - SUSPICIOUS if:
+          * generic keywords in memory, OR
+          * suspicious log markers, OR
+          * Prefetch/Deleted/RecycleBin hits suggest cheat tools, OR
+          * suspicious filenames on disk
+        (Recorders running are contextual, not damning.)
+      - CLEAN otherwise.
+    """
+    def decide(self, all_findings):
+        reasons = []
+        mem = all_findings.get("memory", {})
+        disk = all_findings.get("disk", {})
+        logs = all_findings.get("logs", {})
+        deleted = all_findings.get("deleted", {})
+        jnh = all_findings.get("jnativehook", {})
+        envf = all_findings.get("environment", {})
 
-# ----------------------------
-# Logs scan: joined servers & suspicious
-# ----------------------------
+        # DIRTY
+        if mem.get("sig_hits"):
+            reasons.append("Injected signatures in javaw memory")
+        if disk.get("flagged_by_hash"):
+            reasons.append("Detected known-bad hashes on disk")
+        if jnh.get("temp_dlls"):
+            reasons.append("JNativeHook-style DLL(s) present in %TEMP%")
 
-SERVER_RE = re.compile(r"(?:Connecting|Connected)\s+to\s+([^\s,]+)", re.IGNORECASE)
-IP_RE = re.compile(r"\b(?:(?:\d{1,3}\.){3}\d{1,3})(?::\d{1,5})?\b")
-SUS_LOG_MARKERS = [
-    "baritone", "liquidbounce", "impact", "meteor", "wurst", "killaura", "reach",
-    "autoclick", "aimassist", "xray", "bleach", "incognito", "esp"
-]
+        if reasons:
+            return "DIRTY / HACKING", reasons
 
-def find_logs_dirs():
-    dirs = []
-    for p in minecraft_paths():
-        logs = os.path.join(p, "logs")
-        if os.path.isdir(logs):
-            dirs.append(logs)
-    return dirs
+        # SUSPICIOUS
+        susp = False
+        if mem.get("generic_hits"):
+            susp = True; reasons.append("Generic cheat keywords present in javaw memory")
+        if logs.get("suspicious_markers"):
+            susp = True; reasons.append("Suspicious markers found in logs")
+        if disk.get("flagged_by_name"):
+            susp = True; reasons.append("Suspicious filenames found in Minecraft directories")
+        if deleted.get("prefetch_suspects") or deleted.get("pca_deleted_paths") or deleted.get("recycle_bin_hits"):
+            susp = True; reasons.append("Deleted/Prefetch/RecycleBin executables detected")
+        if envf.get("recorders_running"):
+            reasons.append("Screen recorder/overlay software running")
 
-def read_text_or_gz(path):
-    try:
-        if path.endswith(".gz"):
-            with gzip.open(path, "rb") as f:
-                return f.read().decode("utf-8", errors="ignore")
+        if susp:
+            return "SUSPICIOUS (LIKELY CHEATING)", reasons or ["One or more suspicious indicators present"]
+        return "CLEAN", ["No cheating indicators detected"]
+
+class Reporter:
+    def __init__(self, out_dir=None):
+        if out_dir:
+            self.out_dir = out_dir
         else:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()
-    except Exception:
-        return ""
+            self.out_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+            if not os.path.isdir(self.out_dir):
+                try:
+                    os.makedirs(self.out_dir, exist_ok=True)
+                except Exception:
+                    self.out_dir = os.getcwd()
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.txt_path = os.path.join(self.out_dir, f"mc_anticheat_report_{ts}.txt")
+        self.json_path = os.path.join(self.out_dir, f"mc_anticheat_report_{ts}.json")
 
-def scan_logs():
-    servers = set()
-    suspicious_hits = []
-    dirs = find_logs_dirs()
-    for d in tqdm(dirs, desc="Scanning log folders", unit="dir"):
-        for fp in glob.glob(os.path.join(d, "latest.log")) + glob.glob(os.path.join(d, "*.gz")):
-            text = read_text_or_gz(fp)
-            if not text:
-                continue
-            for m in SERVER_RE.findall(text):
-                servers.add(m.strip())
-            for line in text.splitlines():
-                l = line.lower()
-                if any(k in l for k in SUS_LOG_MARKERS):
-                    suspicious_hits.append((fp, line[:160]))
-            for m in IP_RE.findall(text):
-                servers.add(m.strip())
-    return sorted(servers), suspicious_hits
-# ----------------------------
-# Classification / Conclusion
-# ----------------------------
+    def _sanitize(self, obj, maxlen=500000):
+        try:
+            s = json.dumps(obj, ensure_ascii=False)
+            if len(s) > maxlen:
+                return json.loads(s[:maxlen])
+            return obj
+        except Exception:
+            return obj
 
-def classify(findings):
-    score = 0
-    reasons = []
+    def write(self, all_findings, verdict, reasons):
+        # TXT
+        with open(self.txt_path, "w", encoding="utf-8") as f:
+            f.write("=== Minecraft Anti-Cheat / Screenshare Report ===\n")
+            f.write(f"Version: {TOOL_VERSION}\n")
+            f.write(f"Scan ID: {SCAN_ID}\n")
+            f.write(f"Host: {platform.node()} | OS: {platform.platform()}\n")
+            f.write(f"Started: {START_TS.isoformat()}\n")
+            f.write(f"Finished: {datetime.now().isoformat()}\n")
+            f.write(f"Verdict: {verdict}\n")
+            f.write("Reasons:\n")
+            for r in reasons:
+                f.write(f"  - {r}\n")
+            f.write("\n--- Findings ---\n")
+            for section, data in all_findings.items():
+                f.write(f"\n[{section.upper()}]\n")
+                try:
+                    f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+                except Exception:
+                    f.write(str(data) + "\n")
 
-    if findings["memory"].get("sig_hits"):
-        score += 6
-        reasons.append("Injected/hacked-client signatures in javaw memory")
-    if findings["memory"].get("dps_hits"):
-        score += 5
-        reasons.append("DPS autoclicker signatures in process memory")
+        # JSON
+        payload = {
+            "meta": {
+                "version": TOOL_VERSION,
+                "scan_id": SCAN_ID,
+                "host": platform.node(),
+                "os": platform.platform(),
+                "started": START_TS.isoformat(),
+                "finished": datetime.now().isoformat(),
+            },
+            "verdict": verdict,
+            "reasons": reasons,
+            "findings": self._sanitize(all_findings)
+        }
+        with open(self.json_path, "w", encoding="utf-8") as jf:
+            json.dump(payload, jf, indent=2, ensure_ascii=False)
+        return self.txt_path, self.json_path
 
-    if findings["mods_flagged"]:
-        score += 3
-        reasons.append("Illegal/suspicious mods present on disk")
-
-    if findings["logs_suspicious"]:
-        score += 2
-        reasons.append("Suspicious markers found in logs")
-
-    if findings["jnativehook"]:
-        score += 2
-        reasons.append("JNativeHook DLL found in Temp (possible autoclicker)")
-
-    if findings["deleted_exes"]:
-        score += 2
-        reasons.append("Recently executed then deleted EXEs observed")
-
-    if score >= 6:
-        verdict = "DIRTY / HACKING"
-    elif score >= 3:
-        verdict = "SUSPICIOUS"
-    else:
-        verdict = "CLEAN"
-
-    return verdict, reasons
-
-# ----------------------------
-# Memory scan: javaw.exe for known strings (javaW string from config) & DPS AND generic cheat keywords (can misflag)
-# ----------------------------
-
-def scan_javaw_memory(javaw_pid):
-    mem_findings = []
-    dps_hits = []
-    sig_hits = []
-    keywords_hits = []
-
-    strings, err = dump_process_strings(javaw_pid, min_length=5)
-    if err == "permission_denied":
-        return {"error": "permission_denied"}
-
-    strings = strings or []
-    sset = set(s.lower() for s in strings)
-
-    for k, name in dpsStrings.items():
-        if any(k.lower() in s for s in sset):
-            dps_hits.append((k, name))
-
-    for sig, label in javawStrings.items():
-        if any(sig.lower() in s for s in sset):
-            sig_hits.append((sig, label))
-
-    for kw in ILLEGAL_KEYWORDS:
-        if any(kw in s for s in sset):
-            keywords_hits.append(kw)
-
-    mc_user = None
-    for s in strings:
-        if "logged in as" in s.lower() or "username" in s.lower():
-            m = re.search(r"(?:as|username)\s*[:=]\s*([A-Za-z0-9_]{3,16})", s, re.IGNORECASE)
-            if m:
-                mc_user = m.group(1)
-                break
-
-    return {
-        "sig_hits": sig_hits,
-        "dps_hits": dps_hits,
-        "keywords_hits": sorted(set(keywords_hits)),
-        "username_hint": mc_user
-    }
-
-# ----------------------------
-# Main
-# ----------------------------
+# console (what user sees)
 
 def main():
-    print("=== Minecraft SS Tool (Windows) ===\n")
-    log_line("=== Minecraft SS Tool (Windows) ===")
+    ascii_banner = r"""
+                                      $$\                 $$\                         $$\ 
+                                      $  |                $$ |                        $$ |
+ $$$$$$\   $$$$$$\  $$\   $$\  $$$$$$\\_/$$$$$$$\       $$$$$$\    $$$$$$\   $$$$$$\  $$ |
+ \____$$\ $$  __$$\ $$ |  $$ |$$  __$$\ $$  _____|      \_$$  _|  $$  __$$\ $$  __$$\ $$ |
+ $$$$$$$ |$$ /  $$ |$$ |  $$ |$$ /  $$ |\$$$$$$\          $$ |    $$ /  $$ |$$ /  $$ |$$ |
+$$  __$$ |$$ |  $$ |$$ |  $$ |$$ |  $$ | \____$$\         $$ |$$\ $$ |  $$ |$$ |  $$ |$$ |
+\$$$$$$$ |\$$$$$$$ |\$$$$$$  |\$$$$$$  |$$$$$$$  |        \$$$$  |\$$$$$$  |\$$$$$$  |$$ |
+ \_______| \____$$ | \______/  \______/ \_______/          \____/  \______/  \______/ \__|
+                $$ |                                                                      
+                $$ |                                                                      
+                \__|                                                           \______/                                         
+    """
+    print(Fore.MAGENTA + ascii_banner + Style.RESET_ALL)
 
-    # 1) Find javaw.exe PID (Minecraft)
-    javaw_pid = get_pid_by_name("javaw.exe")
-    memory_result = {}
-    if javaw_pid:
-        msg = f"[+] javaw.exe PID: {javaw_pid}"
-    else:
-        msg = "[!] javaw.exe not found (Minecraft not running?) — skipping memory scan."
-    print(msg); log_line(msg)
+    print(Fore.CYAN + f"[+] Minecraft Anti-Cheat / Screenshare Tool v{TOOL_VERSION} — Scan {SCAN_ID}" + Style.RESET_ALL)
 
-    # 2) Scan memory (javaw)
-    if javaw_pid:
-        print("\n[*] Scanning javaw.exe memory for hacked-client signatures..."); log_line("[*] Scanning javaw.exe memory...")
-        memory_result = scan_javaw_memory(javaw_pid)
-        if memory_result.get("error") == "permission_denied":
-            msg = "    [!] Permission denied reading javaw.exe memory."
-            print(msg); log_line(msg)
-        else:
-            if memory_result.get("sig_hits"):
-                for sig, label in memory_result["sig_hits"][:50]:
-                    msg = f"    [SIG] {label}: '{sig}'"
-                    print(f"{RED}{msg}{RESET}"); log_line(msg)
-            if memory_result.get("dps_hits"):
-                for k, label in memory_result["dps_hits"]:
-                    msg = f"    [DPS] {label}: key='{k}'"
-                    print(f"{RED}{msg}{RESET}"); log_line(msg)
-            if memory_result.get("keywords_hits"):
-                msg = f"    [KW] generic cheat keywords found: {', '.join(memory_result['keywords_hits'])}"
-                print(f"{RED}{msg}{RESET}"); log_line(msg)
-            if memory_result.get("username_hint"):
-                msg = f"    [User] Possible username hint: {memory_result['username_hint']}"
-                print(msg); log_line(msg)
 
-    # 3) JNativeHook temp DLL check
-    print("\n[*] Checking for JNativeHook DLL in Temp..."); log_line("[*] Checking for JNativeHook DLL in Temp...")
-    jnh = check_jnativehook()
-    if jnh:
-        for p in jnh:
-            msg = f"    [!] JNativeHook DLL found: {p}"
-            print(f"{RED}{msg}{RESET}"); log_line(msg)
-    else:
-        msg = "    [+] Nothing found"
-        print(msg); log_line(msg)
+    load_external_db()  # best-effort
 
-    # 4) Deleted executables observation
-    print("\n[*] Looking for recently executed & deleted EXEs..."); log_line("[*] Checking deleted executables...")
-    deleted = {}
-    deleted_pca, del_err = get_deleted_executables_pca()
-    if del_err == "missing_pids":
-        msg = "    [!] Could not locate PcaSvc or explorer.exe — skipping PCA method."
-        print(msg); log_line(msg)
-    elif del_err == "permission_denied":
-        msg = "    [!] Permission denied reading system process memory — skipping PCA method."
-        print(msg); log_line(msg)
-    elif deleted_pca:
-        deleted["pca"] = deleted_pca
-        for k, v in list(deleted_pca.items())[:50]:
-            msg = f"    [DEL][PCA] {k} ({v})"
-            print(f"{RED}{msg}{RESET}"); log_line(msg)
+    all_findings = {}
 
-    pf_res = scan_prefetch_deleted_exes()
-    if pf_res:
-        deleted["prefetch"] = pf_res
-        print("    [Prefetch] Potentially deleted or bad EXEs:"); log_line("[Prefetch] Potentially deleted/bad EXEs:")
-        for exe, status, h in pf_res[:50]:
-            if status == "deleted":
-                msg = f"       - {exe} [deleted]"
-                print(f"{RED}{msg}{RESET}"); log_line(msg)
-            elif status == "bad_hash":
-                msg = f"       - {exe} [bad hash: {h}]"
-                print(f"{RED}{msg}{RESET}"); log_line(msg)
+    # 1) Memory
+    print(Fore.YELLOW + "[*] Scanning javaw.exe memory..." + Style.RESET_ALL)
+    mem = MemoryScanner().scan_javaw()
+    all_findings["memory"] = mem
+    pid = mem.get("pid")
+    if not pid:
+        print("    - javaw.exe not found (Minecraft might not be running). Continuing...")
+    elif mem.get("error") == "permission_denied":
+        print("    - Permission denied reading javaw memory (try running as admin).")
 
-    pf_hash_res = scan_prefetch_hashes()
-    if pf_hash_res:
-        deleted["prefetch_hash"] = pf_hash_res
-        print("    [Prefetch-Hash] Known bad prefetch EXEs:"); log_line("[Prefetch-Hash] Known bad prefetch EXEs:")
-        for exe, status, h in pf_hash_res[:50]:
-            msg = f"       - {exe} [{status} {h}]"
-            print(f"{RED}{msg}{RESET}"); log_line(msg)
+    # 2) Disk
+    print(Fore.YELLOW + "[*] Scanning Minecraft directories (names + hashes)..." + Style.RESET_ALL)
+    disk = DiskScanner(known_hashes=KNOWN_BAD_HASHES).scan()
+    all_findings["disk"] = disk
 
-    rb_res = scan_recycle_bin_deleted_exes()
-    if rb_res:
-        deleted["recyclebin"] = rb_res
-        print("    [RecycleBin] Deleted/present EXEs:"); log_line("[RecycleBin] Deleted/present EXEs:")
-        for f, user, status, h in rb_res[:50]:
-            if status in ("deleted", "bad_hash"):
-                msg = f"       - {f} (User: {user}) [{status}{' ' + h if h else ''}]"
-                print(f"{RED}{msg}{RESET}"); log_line(msg)
-            else:
-                msg = f"       - {f} (User: {user}) [present]"
-                print(msg); log_line(msg)
+    # 3) Logs
+    print(Fore.YELLOW + "[*] Parsing Minecraft logs..." + Style.RESET_ALL)
+    logs = LogParser().scan()
+    all_findings["logs"] = logs
 
-    # 5) Minecraft mods/jars scanning
-    mods, mods_flagged = list_mods_and_flag_illegal()
-    if mods_flagged:
-        print("\n[!] Suspicious/illegal mods found:"); log_line("[!] Suspicious/illegal mods found:")
-        for fp, why in mods_flagged:
-            msg = f"    {fp} [{why}]"
-            print(f"{RED}{msg}{RESET}"); log_line(msg)
+    # 4) Deleted EXE/JAR: Prefetch, PCA/Explorer, Recycle Bin
+    print(Fore.YELLOW + "[*] Checking Prefetch / PCA / Explorer / Recycle Bin for deleted EXE/JAR traces..." + Style.RESET_ALL)
+    deleted = DeletedFileScanner().scan()
+    all_findings["deleted"] = deleted
 
-    # 6) Logs
-    print("\n[*] Scanning Minecraft logs (joined servers & suspicious markers)..."); log_line("[*] Scanning logs...")
-    servers, logs_susp = scan_logs()
-    if servers:
-        print("    [Servers] Recently seen:"); log_line("[Servers] Recently seen:")
-        for s in servers[:20]:
-            msg = f"      - {s}"
-            print(msg); log_line(msg)
-    if logs_susp:
-        print(RED + "    [!] Suspicious log markers:" + RESET); log_line("[!] Suspicious log markers:")
-        for fp, line in logs_susp[:30]:
-            msg = f"      - {os.path.basename(fp)}: {line}"
-            print(f"{RED}{msg}{RESET}"); log_line(msg)
+    # 5) JNativeHook in %TEMP%
+    print(Fore.YELLOW + "[*] Scanning %TEMP% for JNativeHook DLLs..." + Style.RESET_ALL)
+    jnh = JNativeHookScanner().scan()
+    all_findings["jnativehook"] = jnh
 
-    # 7) Recording software
-    print("\n[*] Checking for recording/overlay software..."); log_line("[*] Checking recording software...")
-    recs = detect_recorders()
-    for exe, name in recs:
-        msg = f"    [REC] {name} running ({exe})"
-        print(msg); log_line(msg)
+    # 6) Environment: Recorders/Overlays
+    print(Fore.YELLOW + "[*] Checking for screen recorders/overlays..." + Style.RESET_ALL)
+    envf = EnvironmentScanner().scan()
+    all_findings["environment"] = envf
 
-    # 8) Classification
-    findings = {
-        "memory": memory_result if memory_result else {},
-        "mods_flagged": mods_flagged,
-        "logs_suspicious": logs_susp,
-        "jnativehook": jnh,
-        "deleted_exes": deleted
-    }
-    verdict, reasons = classify(findings)
+    # final verdict
+    verdict, reasons = Classifier().decide(all_findings)
+    print(Fore.GREEN + f"[+] Verdict: {verdict}" + Style.RESET_ALL)
+    for r in reasons:
+        print("    - " + r)
 
-    print("\n==================== RESULT ===================="); log_line("==================== RESULT ====================")
-    verdict_color = RED if verdict != "CLEAN" else RESET
-    msg = f"Conclusion: {verdict}"
-    print(f"Conclusion: {verdict_color}{verdict}{RESET}"); log_line(msg)
-    if reasons:
-        print("Reasons:"); log_line("Reasons:")
-        for r in reasons:
-            print(f" - {r}"); log_line(f" - {r}")
-    else:
-        print(" - No notable findings."); log_line(" - No notable findings.")
-    print("================================================"); log_line("================================================")
+    # Report/logs
+    reporter = Reporter()
+    txt, js = reporter.write(all_findings, verdict, reasons)
 
-    print(f"\nResults saved to {LOGFILE}"); log_line(f"Results saved to {LOGFILE}")
+    print(Fore.CYAN + f"\n[+] Reports saved to: {reporter.out_dir}" + Style.RESET_ALL)
+    print("    - " + txt)
+    print("    - " + js)
 
 
 if __name__ == "__main__":
     try:
-        main()
+        exit_code = main()
     except KeyboardInterrupt:
-        print("\nInterrupted by user.")
+        print("\n[!] Aborted by user.")
+        exit_code = 1
+    except Exception as e:
+        print(Fore.RED + "[!] Unhandled error: " + str(e) + Style.RESET_ALL)
+        traceback.print_exc()
+        exit_code = 2
 
+    input("\nPress Enter to close...")
+    sys.exit(exit_code)
+
+    #aquoric2
+    #https://aquoric.github.io/
